@@ -10,36 +10,57 @@ namespace EastFive.Messaging
 {
     public abstract class QueueProcessor<TMessageParam>
     {
-        private SubscriptionClient receiveClient;
-        private static Dictionary<string, TopicClient> sendClients =
-            new Dictionary<string, TopicClient>();
-        private static TopicClient errorClient;
+        private QueueClient receiveClient;
+        private static Dictionary<string, QueueClient> sendClients =
+            new Dictionary<string, QueueClient>();
+        private static QueueClient errorClient;
 
         private const string MESSAGE_PROPERTY_KEY_MESSAGE_NAME = "MessageName";
         private const string ERROR_TOPIC = "ERRORS";
         
-        protected QueueProcessor()
+        protected QueueProcessor(string subscription)
         {
-            var topic = GetTopic(this.GetType());
-            var subscription = GetSubscription();
             var serviceBusConnectionString = Web.Configuration.Settings.Get(
                 Configuration.MessageBusDefinitions.ServiceBusConnectionString);
-            sendClients[topic] = TopicClient.CreateFromConnectionString(serviceBusConnectionString, topic);
-            errorClient = TopicClient.CreateFromConnectionString(serviceBusConnectionString, ERROR_TOPIC);
+            sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
+            errorClient = QueueClient.CreateFromConnectionString(serviceBusConnectionString, ERROR_TOPIC);
 
-            // Create the topic if it does not exist already
+            //// Create the topic if it does not exist already
             var namespaceManager =
                 NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
-            if (!namespaceManager.TopicExists(topic))
-                namespaceManager.CreateTopic(topic);
-            if (!namespaceManager.SubscriptionExists(topic, subscription))
-            {
-                var applicationInstanceFilter = new SqlFilter ($"{MESSAGE_PROPERTY_KEY_MESSAGE_NAME} = '{subscription}'");
-                namespaceManager.CreateSubscription(topic, subscription, applicationInstanceFilter);
-            }
+            //if (!namespaceManager.TopicExists(topic))
+            //{
+            //    try
+            //    {
+            //        namespaceManager.CreateTopic(topic);
+            //    }
+            //    catch (ArgumentException ex)
+            //    {
+            //        if (!(ex.InnerException is WebException))
+            //            throw;
+            //        var webEx = ex.InnerException as WebException;
+            //        if (!(webEx.Response is HttpWebResponse))
+            //            throw;
+            //        var httpResponse = webEx.Response as HttpWebResponse;
+            //        if (httpResponse.StatusCode != HttpStatusCode.BadRequest)
+            //            throw;
+            //        // It's just free tier and topics aren't allowed.
+            //    }
+            //}
+            //if (!namespaceManager.SubscriptionExists(topic, subscription))
+            //{
+            //    var applicationInstanceFilter = new SqlFilter ($"{MESSAGE_PROPERTY_KEY_MESSAGE_NAME} = '{subscription}'");
+            //    namespaceManager.CreateSubscription(topic, subscription, applicationInstanceFilter);
+            //    namespaceManager.CreateSubscription(new SubscriptionDescription()
+            //    {
+
+            //    });
+            //}
+            if (!namespaceManager.QueueExists(subscription))
+                namespaceManager.CreateQueue(subscription);
             receiveClient =
-                SubscriptionClient.CreateFromConnectionString
-                        (serviceBusConnectionString, topic, subscription);
+                QueueClient.CreateFromConnectionString
+                        (serviceBusConnectionString, subscription);
         }
 
         private static string GetSubscription()
@@ -52,9 +73,9 @@ namespace EastFive.Messaging
             return topic.FullName.Replace('.', '_');
         }
 
-        protected enum MessageProcessStatus
+        public enum MessageProcessStatus
         {
-            Complete, ReprocessLater, ReprocessImmediately, Broken
+            Complete, ReprocessLater, ReprocessImmediately, Broken, NoAction,
         }
 
         protected virtual TMessageParam ParseMessageParams(IDictionary<string, object> messageParamsDictionary)
@@ -88,7 +109,7 @@ namespace EastFive.Messaging
             Func<TResult> onUnprocessed,
             Func<string, TResult> onBrokenMessage);
 
-        public void Execute()
+        public MessageProcessStatus Execute()
         {
             BrokeredMessage message;
             try
@@ -97,48 +118,50 @@ namespace EastFive.Messaging
             }
             catch (MessagingCommunicationException ex)
             {
-                return;
+                return MessageProcessStatus.NoAction;
             }
 
-            if (message != null)
+            if (message == null)
+                return MessageProcessStatus.NoAction;
+            try
             {
-                try
-                {
-                    var messageParams = ParseMessageParams(message.Properties);
-                    var result = ProcessMessageAsync(messageParams,
-                        () =>
-                        {
-                            message.Complete();
-                            return MessageProcessStatus.Complete;
-                        },
-                        () =>
-                        {
+                var messageParams = ParseMessageParams(message.Properties);
+                var result = ProcessMessageAsync(messageParams,
+                    () =>
+                    {
+                        message.Complete();
+                        return MessageProcessStatus.Complete;
+                    },
+                    () =>
+                    {
                             // TODO: Update resent count and send error if it gets too large
                             // Let message get resent
                             return MessageProcessStatus.ReprocessImmediately;
-                        },
-                        (why) =>
-                        {
-                            TerminateMessage(message, why);
-                            return MessageProcessStatus.Broken;
-                        });
-                }
-                catch (WebException)
+                    },
+                    (why) =>
+                    {
+                        TerminateMessage(message, why);
+                        return MessageProcessStatus.Broken;
+                    });
+                return result.Result;
+            }
+            catch (WebException)
+            {
+                // Let message get resent
+                return MessageProcessStatus.ReprocessLater;
+            }
+            catch (Exception)
+            {
+                // Indicate a problem, unlock message in subscription
+                try
                 {
-                    // Let message get resent
+                    // message.Complete();
                 }
                 catch (Exception)
                 {
-                    // Indicate a problem, unlock message in subscription
-                    try
-                    {
-                        // message.Complete();
-                    }
-                    catch (Exception)
-                    {
-                        message.Abandon();
-                    }
+                    message.Abandon();
                 }
+                return MessageProcessStatus.Broken;
             }
         }
 
@@ -183,15 +206,14 @@ namespace EastFive.Messaging
             message.DeadLetter(why, errorMessage.MessageId);
         }
 
-        protected static void Send<TQueueProcessor>(TMessageParam messageParams)
+        protected static void Send<TQueueProcessor>(TMessageParam messageParams, string subscription)
             where TQueueProcessor : QueueProcessor<TMessageParam>
         {
-            var subscription = GetSubscription();
-            var topic = GetTopic(typeof(TQueueProcessor));
+            //var topic = GetTopic(typeof(TQueueProcessor));
             var message = new BrokeredMessage();
             EncodeMessageParams(message.Properties, messageParams);
             message.Properties[MESSAGE_PROPERTY_KEY_MESSAGE_NAME] = subscription;
-            var sendClient = sendClients[topic];
+            var sendClient = sendClients[subscription];
             lock (sendClient)
             {
                 sendClient.Send(message);
