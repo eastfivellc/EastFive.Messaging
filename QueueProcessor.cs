@@ -13,51 +13,26 @@ namespace EastFive.Messaging
         private QueueClient receiveClient;
         private static Dictionary<string, QueueClient> sendClients =
             new Dictionary<string, QueueClient>();
-        private static QueueClient errorClient;
 
         private const string MESSAGE_PROPERTY_KEY_MESSAGE_NAME = "MessageName";
-        private const string ERROR_TOPIC = "ERRORS";
         
         protected QueueProcessor(string subscription)
         {
             var serviceBusConnectionString = Web.Configuration.Settings.Get(
                 Configuration.MessageBusDefinitions.ServiceBusConnectionString);
             sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
-            errorClient = QueueClient.CreateFromConnectionString(serviceBusConnectionString, ERROR_TOPIC);
-
+            
             //// Create the topic if it does not exist already
             var namespaceManager =
                 NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
-            //if (!namespaceManager.TopicExists(topic))
-            //{
-            //    try
-            //    {
-            //        namespaceManager.CreateTopic(topic);
-            //    }
-            //    catch (ArgumentException ex)
-            //    {
-            //        if (!(ex.InnerException is WebException))
-            //            throw;
-            //        var webEx = ex.InnerException as WebException;
-            //        if (!(webEx.Response is HttpWebResponse))
-            //            throw;
-            //        var httpResponse = webEx.Response as HttpWebResponse;
-            //        if (httpResponse.StatusCode != HttpStatusCode.BadRequest)
-            //            throw;
-            //        // It's just free tier and topics aren't allowed.
-            //    }
-            //}
-            //if (!namespaceManager.SubscriptionExists(topic, subscription))
-            //{
-            //    var applicationInstanceFilter = new SqlFilter ($"{MESSAGE_PROPERTY_KEY_MESSAGE_NAME} = '{subscription}'");
-            //    namespaceManager.CreateSubscription(topic, subscription, applicationInstanceFilter);
-            //    namespaceManager.CreateSubscription(new SubscriptionDescription()
-            //    {
-
-            //    });
-            //}
-            if (!namespaceManager.QueueExists(subscription))
-                namespaceManager.CreateQueue(subscription);
+            try
+            {
+                if (!namespaceManager.QueueExists(subscription))
+                    namespaceManager.CreateQueue(subscription);
+            } catch(System.UnauthorizedAccessException)
+            {
+                // Swallow case where management permissions are not on connection string policy
+            }
             receiveClient =
                 QueueClient.CreateFromConnectionString
                         (serviceBusConnectionString, subscription);
@@ -167,43 +142,7 @@ namespace EastFive.Messaging
 
         private void TerminateMessage(BrokeredMessage message, string why)
         {
-            // Send an error message before sticking it on the dead letter queue
-            var errorMessage = new BrokeredMessage();
-            errorMessage.Properties.Add("message_id", message.MessageId);
-
-            // Add the error data conservatively converting everything to strings
-            //foreach (var errorDataKey in ex.Data.Keys)
-            //{
-            //    var errorDataValue = ex.Data[errorDataKey];
-            //    errorMessage.Properties.Add(errorDataKey.ToString(), errorDataValue.ToString());
-            //}
-
-            // Serialze other collections
-            var stream = new System.IO.MemoryStream();
-
-            // store message properties
-            new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(IDictionary<string, object>)).WriteObject(stream, message.Properties);
-            var messageProperties = System.Text.Encoding.UTF8.GetString(stream.GetBuffer());
-            errorMessage.Properties.Add("message_properties", messageProperties);
-
-            // store inner exception
-            //try
-            //{
-            //    new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(Exception)).WriteObject(stream, ex.InnerException);
-            //    var innerException = System.Text.Encoding.UTF8.GetString(stream.GetBuffer());
-            //    errorMessage.Properties.Add("inner_exception", innerException);
-            //}
-            //catch (Exception)
-            //{
-            //    // This is optional anyway
-            //}
-
-            lock (errorClient)
-            {
-                errorClient.Send(errorMessage);
-            }
-
-            message.DeadLetter(why, errorMessage.MessageId);
+            message.DeadLetter(why, why);
         }
 
         protected static void Send<TQueueProcessor>(TMessageParam messageParams, string subscription)
@@ -213,6 +152,13 @@ namespace EastFive.Messaging
             var message = new BrokeredMessage();
             EncodeMessageParams(message.Properties, messageParams);
             message.Properties[MESSAGE_PROPERTY_KEY_MESSAGE_NAME] = subscription;
+            if (!sendClients.ContainsKey(subscription))
+            {
+                var serviceBusConnectionString = Web.Configuration.Settings.Get(
+                    Configuration.MessageBusDefinitions.ServiceBusConnectionString);
+                sendClients[subscription] = QueueClient.CreateFromConnectionString(
+                    serviceBusConnectionString, subscription);
+            }
             var sendClient = sendClients[subscription];
             lock (sendClient)
             {
