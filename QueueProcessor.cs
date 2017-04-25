@@ -142,7 +142,13 @@ namespace EastFive.Messaging
 
         private void TerminateMessage(BrokeredMessage message, string why)
         {
-            message.DeadLetter(why, why);
+            try
+            {
+                message.DeadLetter(why, why);
+            } catch (Exception)
+            {
+                message.Abandon();
+            }
         }
 
         protected static void Send<TQueueProcessor>(TMessageParam messageParams, string subscription)
