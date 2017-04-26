@@ -5,6 +5,9 @@ using System.Collections.Generic;
 using Microsoft.ServiceBus;
 using Microsoft.ServiceBus.Messaging;
 using System.Threading.Tasks;
+using BlackBarLabs.Extensions;
+using System.Linq;
+using BlackBarLabs.Collections.Generic;
 
 namespace EastFive.Messaging
 {
@@ -84,7 +87,115 @@ namespace EastFive.Messaging
             Func<TResult> onUnprocessed,
             Func<string, TResult> onBrokenMessage);
 
-        public MessageProcessStatus Execute()
+        public void Execute()
+        {
+            receiveClient.OnMessageAsync(
+                async (receivedMessage) =>
+                {
+                    try
+                    {
+                        var message = receivedMessage;
+                        var waitToMarkTaskComplete = new System.Threading.AutoResetEvent(false);
+                        var messageAction = MessageProcessStatus.NoAction;
+                        var why = string.Empty;
+                        var renewTask = Task.Run<Task>(
+                            () =>
+                            {
+                                while (true)
+                                {
+                                    var fiveSecondsBeforeExpiration = (message.LockedUntilUtc - DateTime.UtcNow) - TimeSpan.FromSeconds(5);
+                                    if (fiveSecondsBeforeExpiration.TotalMilliseconds <= 0 ||
+                                        !waitToMarkTaskComplete.WaitOne(fiveSecondsBeforeExpiration))
+                                    {
+                                        try
+                                        {
+                                            message.RenewLock();
+                                        }
+                                        catch (Exception)
+                                        {
+                                            return 0.ToTask();
+                                        }
+                                        continue;
+                                    }
+                                    try
+                                    {
+                                        switch (messageAction)
+                                        {
+                                            case MessageProcessStatus.Complete:
+                                                return message.CompleteAsync();
+                                            case MessageProcessStatus.ReprocessLater:
+                                            case MessageProcessStatus.ReprocessImmediately:
+                                            case MessageProcessStatus.NoAction:
+                                                return message.DeferAsync();
+                                            case MessageProcessStatus.Broken:
+                                                return message.DeadLetterAsync(why, why);
+                                            default:
+                                                return message.DeadLetterAsync("Unknown message action", "Unknown message action");
+                                        }
+                                    }
+                                    catch (Exception)
+                                    {
+                                        return 0.ToTask();
+                                    }
+                                }
+                            });
+
+                        // Process the message
+                        var messageParams = ParseMessageParams(message.Properties);
+                        messageAction = await ProcessMessageAsync(messageParams,
+                            () =>
+                            {
+                                message.Complete();
+                                return MessageProcessStatus.Complete;
+                            },
+                            () =>
+                            {
+                                // TODO: Update resent count and send error if it gets too large
+                                // Let message get resent
+                                return MessageProcessStatus.ReprocessImmediately;
+                            },
+                            (whyReturned) =>
+                            {
+                                why = whyReturned;
+                                return MessageProcessStatus.Broken;
+                            });
+                        waitToMarkTaskComplete.Set();
+                        await await renewTask;
+                    }
+                    catch (Exception ex)
+                    {
+                        var telemetryData = (new System.Collections.Generic.Dictionary<string, string>
+                        {
+                               { "receivedMessage.MessageId", receivedMessage.MessageId },
+                               { "receivedMessage.SessionId", receivedMessage.SessionId },
+                               { "receivedMessage.ContentType", receivedMessage.ContentType },
+                               { "receivedMessage.SequenceNumber", receivedMessage.SequenceNumber.ToString() },
+                        })
+                        .Concat(receivedMessage.Properties
+                            .Select(prop => $"receivedMessage.Properties[{prop.Key}]".PairWithValue(
+                                null == prop.Value ? string.Empty : prop.Value.ToString())))
+                        .ToDictionary();
+                        //telemetry.TrackException(ex, telemetryData);
+                    }
+                }, GetOptions());
+        }
+
+        private static OnMessageOptions GetOptions()
+        {
+            var eventDrivenMessagingOptions = new OnMessageOptions();
+            eventDrivenMessagingOptions.AutoComplete = false;
+            eventDrivenMessagingOptions.ExceptionReceived += (object sender, ExceptionReceivedEventArgs e) =>
+            {
+                if (e != null && e.Exception != null)
+                {
+                    //telemetry.TrackTraceAndFlush(" > Exception received: " + e.Exception.Message);
+                }
+            };
+            eventDrivenMessagingOptions.MaxConcurrentCalls = 10;
+            return eventDrivenMessagingOptions;
+        }
+
+        public MessageProcessStatus Execute2()
         {
             BrokeredMessage message;
             try
