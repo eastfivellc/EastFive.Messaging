@@ -54,6 +54,10 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\BlackBarLabs.Core\BlackBarLabs.Core.csproj">
+      <Project>{73088f1b-3aca-476b-aa45-b7d6660f1c73}</Project>
+      <Name>BlackBarLabs.Core</Name>
+    </ProjectReference>
     <ProjectReference Include="..\BlackBarLabs.Web\BlackBarLabs.Web.csproj">
       <Project>{5bb52391-2704-44c0-bc8a-dbbe31498814}</Project>
       <Name>BlackBarLabs.Web</Name>
