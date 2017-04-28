@@ -263,9 +263,8 @@ namespace EastFive.Messaging
         }
 
         protected static void Send<TQueueProcessor>(TMessageParam messageParams, string subscription)
-            where TQueueProcessor : QueueProcessor<TMessageParam>
+             where TQueueProcessor : QueueProcessor<TMessageParam>
         {
-            //var topic = GetTopic(typeof(TQueueProcessor));
             var message = new BrokeredMessage();
             EncodeMessageParams(message.Properties, messageParams);
             message.Properties[MESSAGE_PROPERTY_KEY_MESSAGE_NAME] = subscription;
@@ -273,8 +272,20 @@ namespace EastFive.Messaging
             {
                 var serviceBusConnectionString = Web.Configuration.Settings.Get(
                     Configuration.MessageBusDefinitions.ServiceBusConnectionString);
-                sendClients[subscription] = QueueClient.CreateFromConnectionString(
-                    serviceBusConnectionString, subscription);
+                sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
+
+                //// Create the topic if it does not exist already
+                var namespaceManager =
+                    NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
+                try
+                {
+                    if (!namespaceManager.QueueExists(subscription))
+                        namespaceManager.CreateQueue(subscription);
+                }
+                catch (System.UnauthorizedAccessException)
+                {
+                    // Swallow case where management permissions are not on connection string policy
+                }
             }
             var sendClient = sendClients[subscription];
             lock (sendClient)
