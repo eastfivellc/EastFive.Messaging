@@ -170,6 +170,8 @@ namespace EastFive.Messaging
                                { "receivedMessage.SessionId", receivedMessage.SessionId },
                                { "receivedMessage.ContentType", receivedMessage.ContentType },
                                { "receivedMessage.SequenceNumber", receivedMessage.SequenceNumber.ToString() },
+                               { "exception.Message", ex.Message },
+                               { "exception.StackTrace", ex.StackTrace },
                         })
                         .Concat(receivedMessage.Properties
                             .Select(prop => $"receivedMessage.Properties[{prop.Key}]".PairWithValue(
