@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using BlackBarLabs.Extensions;
 using System.Linq;
 using BlackBarLabs.Collections.Generic;
+using EastFive.Collections.Generic;
 
 namespace EastFive.Messaging
 {
@@ -195,73 +196,6 @@ namespace EastFive.Messaging
             };
             eventDrivenMessagingOptions.MaxConcurrentCalls = 10;
             return eventDrivenMessagingOptions;
-        }
-
-        public MessageProcessStatus Execute2()
-        {
-            BrokeredMessage message;
-            try
-            {
-                message = receiveClient.Receive();
-            }
-            catch (MessagingCommunicationException ex)
-            {
-                return MessageProcessStatus.NoAction;
-            }
-
-            if (message == null)
-                return MessageProcessStatus.NoAction;
-            try
-            {
-                var messageParams = ParseMessageParams(message.Properties);
-                var result = ProcessMessageAsync(messageParams,
-                    () =>
-                    {
-                        message.Complete();
-                        return MessageProcessStatus.Complete;
-                    },
-                    () =>
-                    {
-                            // TODO: Update resent count and send error if it gets too large
-                            // Let message get resent
-                            return MessageProcessStatus.ReprocessImmediately;
-                    },
-                    (why) =>
-                    {
-                        TerminateMessage(message, why);
-                        return MessageProcessStatus.Broken;
-                    });
-                return result.Result;
-            }
-            catch (WebException)
-            {
-                // Let message get resent
-                return MessageProcessStatus.ReprocessLater;
-            }
-            catch (Exception)
-            {
-                // Indicate a problem, unlock message in subscription
-                try
-                {
-                    // message.Complete();
-                }
-                catch (Exception)
-                {
-                    message.Abandon();
-                }
-                return MessageProcessStatus.Broken;
-            }
-        }
-
-        private void TerminateMessage(BrokeredMessage message, string why)
-        {
-            try
-            {
-                message.DeadLetter(why, why);
-            } catch (Exception)
-            {
-                message.Abandon();
-            }
         }
 
         protected static void Send<TQueueProcessor>(TMessageParam messageParams, string subscription)
