@@ -17,29 +17,43 @@ namespace EastFive.Messaging
         private QueueClient receiveClient;
         private static Dictionary<string, QueueClient> sendClients =
             new Dictionary<string, QueueClient>();
+        private Task executionThread;
 
         private const string MESSAGE_PROPERTY_KEY_MESSAGE_NAME = "MessageName";
         
         protected QueueProcessor(string subscription)
         {
-            var serviceBusConnectionString = Web.Configuration.Settings.Get(
-                Configuration.MessageBusDefinitions.ServiceBusConnectionString);
-            sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
-            
-            //// Create the topic if it does not exist already
-            var namespaceManager =
-                NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
-            try
-            {
-                if (!namespaceManager.QueueExists(subscription))
-                    namespaceManager.CreateQueue(subscription);
-            } catch(System.UnauthorizedAccessException)
-            {
-                // Swallow case where management permissions are not on connection string policy
-            }
-            receiveClient =
-                QueueClient.CreateFromConnectionString
-                        (serviceBusConnectionString, subscription);
+            Web.Configuration.Settings.GetString(
+                    Configuration.MessageBusDefinitions.ServiceBusConnectionString,
+                serviceBusConnectionString =>
+                {
+                    sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
+                    receiveClient =
+                            QueueClient.CreateFromConnectionString
+                                (serviceBusConnectionString, subscription);
+
+                    executionThread = Task.Run(
+                            async () =>
+                            {
+                                //// Create the topic if it does not exist already
+                                var namespaceManager =
+                                    NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
+
+                                try
+                                {
+                                    if (!await namespaceManager.QueueExistsAsync(subscription))
+                                        await namespaceManager.CreateQueueAsync(subscription);
+                                }
+                                catch (System.UnauthorizedAccessException)
+                                {
+                                    // Swallow case where management permissions are not on connection string policy
+                                }
+
+                                Execute();
+                            });
+                    return true;
+                },
+                (why) => false);
         }
 
         private static string GetSubscription()
@@ -88,7 +102,7 @@ namespace EastFive.Messaging
             Func<TResult> onUnprocessed,
             Func<string, TResult> onBrokenMessage);
 
-        public void Execute()
+        private void Execute()
         {
             receiveClient.OnMessageAsync(
                 async (receivedMessage) =>
