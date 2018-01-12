@@ -98,7 +98,7 @@ namespace EastFive.Messaging
         }
 
         protected abstract Task<TResult> ProcessMessageAsync<TResult>(TMessageParam messageParams,
-            Func<TResult> onProcessed,
+            Func<Task<TResult>> onProcessed,
             Func<TResult> onUnprocessed,
             Func<string, TResult> onBrokenMessage);
 
@@ -161,7 +161,7 @@ namespace EastFive.Messaging
                             () =>
                             {
                                 message.Complete();
-                                return MessageProcessStatus.Complete;
+                                return MessageProcessStatus.Complete.ToTask();
                             },
                             () =>
                             {
