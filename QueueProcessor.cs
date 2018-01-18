@@ -2,58 +2,54 @@
 using System.Net;
 using System.Collections.Generic;
 
-using Microsoft.ServiceBus;
-using Microsoft.ServiceBus.Messaging;
 using System.Threading.Tasks;
 using BlackBarLabs.Extensions;
 using System.Linq;
 using BlackBarLabs.Collections.Generic;
 using EastFive.Collections.Generic;
+using System.Threading;
+using EastFive.Extensions;
 
 namespace EastFive.Messaging
 {
     public abstract class QueueProcessor<TMessageParam>
     {
-        private QueueClient receiveClient;
-        private static Dictionary<string, QueueClient> sendClients =
-            new Dictionary<string, QueueClient>();
-        private Task executionThread;
-
         private const string MESSAGE_PROPERTY_KEY_MESSAGE_NAME = "MessageName";
         
         protected QueueProcessor(string subscription)
         {
-            Web.Configuration.Settings.GetString(
+            subscription = subscription.ToLower();
+            var xexecutionThread = Web.Configuration.Settings.GetString(
                     Configuration.MessageBusDefinitions.ServiceBusConnectionString,
                 serviceBusConnectionString =>
                 {
-                    sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
-                    receiveClient =
-                            QueueClient.CreateFromConnectionString
-                                (serviceBusConnectionString, subscription);
+                    var receiveClient = new Microsoft.Azure.ServiceBus.QueueClient(serviceBusConnectionString, subscription);
+                    // TODO: Create the topic if it does not exist already but swallow the errors if manage privilige is not available
 
-                    executionThread = Task.Run(
-                            async () =>
-                            {
-                                //// Create the topic if it does not exist already
-                                var namespaceManager =
-                                    NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
+                    Func<Microsoft.Azure.ServiceBus.Message, CancellationToken, Task> processMessagesAsync =
+                        (message, cancellationToken) =>
+                        {
+                            return ProcessAsync(message, receiveClient);
+                        };
 
-                                try
-                                {
-                                    if (!await namespaceManager.QueueExistsAsync(subscription))
-                                        await namespaceManager.CreateQueueAsync(subscription);
-                                }
-                                catch (System.UnauthorizedAccessException)
-                                {
-                                    // Swallow case where management permissions are not on connection string policy
-                                }
+                    var messageHandlerOptions = new Microsoft.Azure.ServiceBus.MessageHandlerOptions(ExceptionReceivedHandler)
+                    {
+                        // Maximum number of concurrent calls to the callback ProcessMessagesAsync(), set to 1 for simplicity.
+                        // Set it according to how many messages the application wants to process in parallel.
+                        MaxConcurrentCalls = 1,
 
-                                Execute();
-                            });
-                    return true;
+                        // Indicates whether the message pump should automatically complete the messages after returning from user callback.
+                        // False below indicates the complete operation is handled by the user callback as in ProcessMessagesAsync().
+                        AutoComplete = false,
+
+                        MaxAutoRenewDuration = TimeSpan.FromHours(1),
+                    };
+
+                    // Register the function that processes messages.
+                    receiveClient.RegisterMessageHandler(processMessagesAsync, messageHandlerOptions);
+                    return string.Empty;
                 },
-                (why) => false);
+                (why) => why);
         }
 
         private static string GetSubscription()
@@ -71,20 +67,23 @@ namespace EastFive.Messaging
             Complete, ReprocessLater, ReprocessImmediately, Broken, NoAction,
         }
 
-        protected virtual TMessageParam ParseMessageParams(IDictionary<string, object> messageParamsDictionary)
+        private static TMessageParam ParseMessageParams(IDictionary<string, object> messageParamsDictionary)
         {
-            var constructorInfo = typeof(TMessageParam).GetConstructor(new Type[] { });
-            TMessageParam messageParams = (TMessageParam)constructorInfo.Invoke(new object[] { });
-            foreach (var propertyName in messageParamsDictionary.Keys)
-            {
-                var propertyInfo = typeof(TMessageParam).GetProperty(propertyName);
-                if (propertyInfo != null) // Ignore extra fields at get stuffed into properties like "MessageName"
+            var type = typeof(TMessageParam);
+            var constructorInfo = type.GetConstructor(new Type[] { });
+            return messageParamsDictionary.Aggregate(
+                (TMessageParam)constructorInfo.Invoke(new object[] { }),
+                (messageParams, propertyKvp) =>
                 {
-                    var propertyValue = messageParamsDictionary[propertyName];
-                    propertyInfo.SetValue(messageParams, propertyValue);
-                }
-            }
-            return messageParams;
+                    var propertyName = propertyKvp.Key;
+                    var propertyInfo = type.GetProperty(propertyName);
+                    if (propertyInfo != null) // Ignore extra fields at get stuffed into properties like "MessageName"
+                    {
+                        var propertyValue = messageParamsDictionary[propertyName];
+                        propertyInfo.SetValue(messageParams, propertyValue);
+                    }
+                    return messageParams;
+                });
         }
 
         protected static void EncodeMessageParams(IDictionary<string, object> messageParamsDictionary, TMessageParam messageParams)
@@ -99,149 +98,92 @@ namespace EastFive.Messaging
 
         protected abstract Task<TResult> ProcessMessageAsync<TResult>(TMessageParam messageParams,
             Func<Task<TResult>> onProcessed,
-            Func<TResult> onUnprocessed,
-            Func<string, TResult> onBrokenMessage);
+            Func<Task<TResult>> onUnprocessed,
+            Func<string, Task<TResult>> onBrokenMessage);
 
-        private void Execute()
+        static Task ExceptionReceivedHandler(Microsoft.Azure.ServiceBus.ExceptionReceivedEventArgs exceptionReceivedEventArgs)
         {
-            receiveClient.OnMessageAsync(
-                async (receivedMessage) =>
+            Console.WriteLine($"Message handler encountered an exception {exceptionReceivedEventArgs.Exception}.");
+            var context = exceptionReceivedEventArgs.ExceptionReceivedContext;
+            Console.WriteLine("Exception context for troubleshooting:");
+            Console.WriteLine($"- Endpoint: {context.Endpoint}");
+            Console.WriteLine($"- Entity Path: {context.EntityPath}");
+            Console.WriteLine($"- Executing Action: {context.Action}");
+            return Task.CompletedTask;
+        }
+
+        private async Task ProcessAsync(Microsoft.Azure.ServiceBus.Message message, Microsoft.Azure.ServiceBus.QueueClient client)
+        //private async Task Execute(BrokeredMessage receivedMessage)
+        {
+            try
+            {
+                // Process the message
+                var messageParams = ParseMessageParams(message.UserProperties);
+                var messageAction = await ProcessMessageAsync<MessageProcessStatus>(messageParams,
+                    async () =>
+                    {
+                        //message.Complete();
+                        await client.CompleteAsync(message.SystemProperties.LockToken);
+                        return MessageProcessStatus.Complete;
+                    },
+                    async () =>
+                    {
+                        // TODO: Update resent count and send error if it gets too large
+                        // Let message get resent
+                        await client.ScheduleMessageAsync(message, DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10));
+                        return MessageProcessStatus.ReprocessImmediately;
+                    },
+                    async (whyReturned) =>
+                    {
+                        await client.DeadLetterAsync(message.SystemProperties.LockToken, whyReturned);
+                        return MessageProcessStatus.Broken;
+                    });
+            }
+            catch (Exception ex)
+            {
+                //var telemetryData = (new System.Collections.Generic.Dictionary<string, string>
+                //        {
+                //               { "receivedMessage.MessageId", receivedMessage.MessageId },
+                //               { "receivedMessage.SessionId", receivedMessage.SessionId },
+                //               { "receivedMessage.ContentType", receivedMessage.ContentType },
+                //               { "receivedMessage.SequenceNumber", receivedMessage.SequenceNumber.ToString() },
+                //               { "exception.Message", ex.Message },
+                //               { "exception.StackTrace", ex.StackTrace },
+                //        })
+                //.Concat(receivedMessage.Properties
+                //    .Select(prop => $"receivedMessage.Properties[{prop.Key}]".PairWithValue(
+                //        null == prop.Value ? string.Empty : prop.Value.ToString())))
+                //.ToDictionary();
+                //telemetry.TrackException(ex, telemetryData);
+                await client.DeadLetterAsync(message.SystemProperties.LockToken, ex.Message);
+            }
+        }
+
+        protected static Task<TResult> SendAsync<TQueueProcessor, TResult>(TMessageParam messageParams, string subscription,
+            Func<TResult> onSent,
+            Func<string, TResult> onFailure)
+             where TQueueProcessor : QueueProcessor<TMessageParam>
+        {
+            return Web.Configuration.Settings.GetString(
+                    Configuration.MessageBusDefinitions.ServiceBusConnectionString,
+                async serviceBusConnectionString =>
                 {
+                    var message = new Microsoft.Azure.ServiceBus.Message();
+                    EncodeMessageParams(message.UserProperties, messageParams);
+                    message.UserProperties[MESSAGE_PROPERTY_KEY_MESSAGE_NAME] = subscription;
+                    var sendClient = new Microsoft.Azure.ServiceBus.QueueClient(serviceBusConnectionString, subscription);
                     try
                     {
-                        var message = receivedMessage;
-                        var waitToMarkTaskComplete = new System.Threading.AutoResetEvent(false);
-                        var messageAction = MessageProcessStatus.NoAction;
-                        var why = string.Empty;
-                        var renewTask = Task.Run<Task>(
-                            () =>
-                            {
-                                while (true)
-                                {
-                                    var fiveSecondsBeforeExpiration = (message.LockedUntilUtc - DateTime.UtcNow) - TimeSpan.FromSeconds(5);
-                                    if (fiveSecondsBeforeExpiration.TotalMilliseconds <= 0 ||
-                                        !waitToMarkTaskComplete.WaitOne(fiveSecondsBeforeExpiration))
-                                    {
-                                        try
-                                        {
-                                            message.RenewLock();
-                                        }
-                                        catch (Exception)
-                                        {
-                                            return 0.ToTask();
-                                        }
-                                        continue;
-                                    }
-                                    try
-                                    {
-                                        switch (messageAction)
-                                        {
-                                            case MessageProcessStatus.Complete:
-                                                return message.CompleteAsync();
-                                            case MessageProcessStatus.ReprocessLater:
-                                            case MessageProcessStatus.ReprocessImmediately:
-                                            case MessageProcessStatus.NoAction:
-                                                return message.DeferAsync();
-                                            case MessageProcessStatus.Broken:
-                                                return message.DeadLetterAsync(why, why);
-                                            default:
-                                                return message.DeadLetterAsync("Unknown message action", "Unknown message action");
-                                        }
-                                    }
-                                    catch (Exception)
-                                    {
-                                        return 0.ToTask();
-                                    }
-                                }
-                            });
-
-                        // Process the message
-                        var messageParams = ParseMessageParams(message.Properties);
-                        messageAction = await ProcessMessageAsync(messageParams,
-                            () =>
-                            {
-                                message.Complete();
-                                return MessageProcessStatus.Complete.ToTask();
-                            },
-                            () =>
-                            {
-                                // TODO: Update resent count and send error if it gets too large
-                                // Let message get resent
-                                return MessageProcessStatus.ReprocessImmediately;
-                            },
-                            (whyReturned) =>
-                            {
-                                why = whyReturned;
-                                return MessageProcessStatus.Broken;
-                            });
-                        waitToMarkTaskComplete.Set();
-                        await await renewTask;
+                        await sendClient.SendAsync(message);
+                        return onSent();
                     }
                     catch (Exception ex)
                     {
-                        var telemetryData = (new System.Collections.Generic.Dictionary<string, string>
-                        {
-                               { "receivedMessage.MessageId", receivedMessage.MessageId },
-                               { "receivedMessage.SessionId", receivedMessage.SessionId },
-                               { "receivedMessage.ContentType", receivedMessage.ContentType },
-                               { "receivedMessage.SequenceNumber", receivedMessage.SequenceNumber.ToString() },
-                               { "exception.Message", ex.Message },
-                               { "exception.StackTrace", ex.StackTrace },
-                        })
-                        .Concat(receivedMessage.Properties
-                            .Select(prop => $"receivedMessage.Properties[{prop.Key}]".PairWithValue(
-                                null == prop.Value ? string.Empty : prop.Value.ToString())))
-                        .ToDictionary();
-                        //telemetry.TrackException(ex, telemetryData);
+                        return onFailure(ex.Message);
                     }
-                }, GetOptions());
-        }
+                },
+                onFailure.AsAsyncFunc()); 
 
-        private static OnMessageOptions GetOptions()
-        {
-            var eventDrivenMessagingOptions = new OnMessageOptions();
-            eventDrivenMessagingOptions.AutoComplete = false;
-            eventDrivenMessagingOptions.ExceptionReceived += (object sender, ExceptionReceivedEventArgs e) =>
-            {
-                if (e != null && e.Exception != null)
-                {
-                    //telemetry.TrackTraceAndFlush(" > Exception received: " + e.Exception.Message);
-                }
-            };
-            eventDrivenMessagingOptions.MaxConcurrentCalls = 10;
-            return eventDrivenMessagingOptions;
-        }
-
-        protected static void Send<TQueueProcessor>(TMessageParam messageParams, string subscription)
-             where TQueueProcessor : QueueProcessor<TMessageParam>
-        {
-            var message = new BrokeredMessage();
-            EncodeMessageParams(message.Properties, messageParams);
-            message.Properties[MESSAGE_PROPERTY_KEY_MESSAGE_NAME] = subscription;
-            if (!sendClients.ContainsKey(subscription))
-            {
-                var serviceBusConnectionString = Web.Configuration.Settings.Get(
-                    Configuration.MessageBusDefinitions.ServiceBusConnectionString);
-                sendClients[subscription] = QueueClient.CreateFromConnectionString(serviceBusConnectionString, subscription);
-
-                //// Create the topic if it does not exist already
-                var namespaceManager =
-                    NamespaceManager.CreateFromConnectionString(serviceBusConnectionString);
-                try
-                {
-                    if (!namespaceManager.QueueExists(subscription))
-                        namespaceManager.CreateQueue(subscription);
-                }
-                catch (System.UnauthorizedAccessException)
-                {
-                    // Swallow case where management permissions are not on connection string policy
-                }
-            }
-            var sendClient = sendClients[subscription];
-            lock (sendClient)
-            {
-                sendClient.Send(message);
-            }
         }
     }
 }
