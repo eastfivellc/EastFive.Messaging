@@ -90,7 +90,7 @@
       <Project>{73088f1b-3aca-476b-aa45-b7d6660f1c73}</Project>
       <Name>EastFive.Core</Name>
     </ProjectReference>
-    <ProjectReference Include="C:\Users\Josh\Repos\OrderOwl\\BlackBarLabs.Core\BlackBarLabs.Core.csproj">
+    <ProjectReference Include="..\BlackBarLabs.Core\EastFive.Core.csproj">
       <Project>{73088f1b-3aca-476b-aa45-b7d6660f1c73}</Project>
       <Name>BlackBarLabs.Core</Name>
     </ProjectReference>
