@@ -9,16 +9,20 @@ using BlackBarLabs.Collections.Generic;
 using EastFive.Collections.Generic;
 using System.Threading;
 using EastFive.Extensions;
+using System.Net.Http;
+using EastFive.Linq;
 
 namespace EastFive.Messaging
 {
     public abstract class QueueProcessor<TMessageParam>
     {
         private const string MESSAGE_PROPERTY_KEY_MESSAGE_NAME = "MessageName";
-        
+        private static string[] subscriptions = new string[] { };
+
         protected QueueProcessor(string subscription)
         {
             subscription = subscription.ToLower();
+            subscriptions = subscriptions.Append(subscription).ToArray();
             var xexecutionThread = Web.Configuration.Settings.GetString(
                     Configuration.MessageBusDefinitions.ServiceBusConnectionString,
                 serviceBusConnectionString =>
@@ -51,6 +55,27 @@ namespace EastFive.Messaging
                 },
                 (why) => why);
         }
+
+        //public static object GetStatus<TResult>(
+        //    Func<object, TResult> p)
+        //{
+        //    return Web.Configuration.Settings.GetString(
+        //            Configuration.MessageBusDefinitions.ServiceBusConnectionString,
+        //        async serviceBusConnectionString =>
+        //        {
+        //            var status = subscriptions
+        //                .Select(
+        //                    subscription =>
+        //                    {
+        //                        var receiveClient = new Microsoft.Azure.ServiceBus.QueueClient(serviceBusConnectionString, subscription);
+        //                        var x = new Microsoft.Azure.ServiceBus.SubscriptionClient(serviceBusConnectionString, subscription, Microsoft.Azure.ServiceBus.ReceiveMode.PeekLock);
+        //                        return "";
+        //                    })
+        //                .ToArray();
+        //            return p(status);
+        //        },
+        //        () => p(null));
+        //}
 
         private static string GetSubscription()
         {
