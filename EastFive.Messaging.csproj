@@ -86,7 +86,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="$(SolutionDir)\BlackBarLabs.Web\BlackBarLabs.Web.csproj">
+    <ProjectReference Include="$(SolutionDir)\BlackBarLabs.Web\EastFive.Web.csproj">
       <Project>{5bb52391-2704-44c0-bc8a-dbbe31498814}</Project>
       <Name>BlackBarLabs.Web</Name>
     </ProjectReference>

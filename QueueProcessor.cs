@@ -23,7 +23,7 @@ namespace EastFive.Messaging
         {
             subscription = subscription.ToLower();
             subscriptions = subscriptions.Append(subscription).ToArray();
-            var xexecutionThread = Web.Configuration.Settings.GetString(
+            var xexecutionThread = EastFive.Web.Configuration.Settings.GetString(
                     Configuration.MessageBusDefinitions.ServiceBusConnectionString,
                 serviceBusConnectionString =>
                 {
@@ -189,7 +189,7 @@ namespace EastFive.Messaging
             Func<string, TResult> onFailure)
              where TQueueProcessor : QueueProcessor<TMessageParam>
         {
-            return Web.Configuration.Settings.GetString(
+            return EastFive.Web.Configuration.Settings.GetString(
                     Configuration.MessageBusDefinitions.ServiceBusConnectionString,
                 async serviceBusConnectionString =>
                 {
