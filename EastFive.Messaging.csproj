@@ -86,13 +86,13 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BlackBarLabs.Web\EastFive.Web.csproj">
-      <Project>{5bb52391-2704-44c0-bc8a-dbbe31498814}</Project>
-      <Name>EastFive.Web</Name>
-    </ProjectReference>
-    <ProjectReference Include="$(SolutionDir)\BlackBarLabs.Core\EastFive.Core.csproj">
+    <ProjectReference Include="..\EastFive.Core\EastFive.Core.csproj">
       <Project>{aec927ef-6aae-4533-bbf6-539643684002}</Project>
       <Name>EastFive.Core</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\EastFive.Web\EastFive.Web.csproj">
+      <Project>{5bb52391-2704-44c0-bc8a-dbbe31498814}</Project>
+      <Name>EastFive.Web</Name>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
